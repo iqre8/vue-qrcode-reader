@@ -1,7 +1,6 @@
-import adapterFactory from "webrtc-adapter/src/js/adapter_factory.js";
 import { StreamApiNotSupportedError, InsecureContextError } from "./errors.js";
-import { imageDataFromVideo } from "./image-data.js";
 import { eventOn, timeout } from "callforth";
+import shimGetUserMedia from "./shimGetUserMedia";
 
 class Camera {
   constructor(videoEl, stream) {
@@ -10,16 +9,18 @@ class Camera {
   }
 
   stop() {
-    this.stream.getTracks().forEach(track => track.stop());
-  }
+    this.videoEl.srcObject = null;
 
-  captureFrame() {
-    return imageDataFromVideo(this.videoEl);
+    this.stream.getTracks().forEach(track => {
+      this.stream.removeTrack(track);
+      track.stop();
+    });
   }
 
   getCapabilities() {
     const [track] = this.stream.getVideoTracks();
-    return track.getCapabilities();
+    // Firefox does not yet support getCapabilities as of August 2020
+    return track?.getCapabilities?.() ?? {};
   }
 }
 
@@ -63,16 +64,6 @@ const narrowDownFacingMode = async camera => {
   }
 };
 
-const INSECURE_CONTEXT = window.isSecureContext !== true;
-
-const STREAM_API_NOT_SUPPORTED = !(
-  navigator &&
-  (navigator.getUserMedia ||
-    (navigator.mediaDevices && navigator.mediaDevices.getUserMedia))
-);
-
-let streamApiShimApplied = false;
-
 export default async function(videoEl, { camera, torch }) {
   // At least in Chrome `navigator.mediaDevices` is undefined when the page is
   // loaded using HTTP rather than HTTPS. Thus `STREAM_API_NOT_SUPPORTED` is
@@ -80,20 +71,17 @@ export default async function(videoEl, { camera, torch }) {
   // So although `getUserMedia` already should have a built-in mechanism to
   // detect insecure context (by throwing `NotAllowedError`), we have to do a
   // manual check before even calling `getUserMedia`.
-  if (INSECURE_CONTEXT) {
+  if (window.isSecureContext !== true) {
     throw new InsecureContextError();
   }
 
-  if (STREAM_API_NOT_SUPPORTED) {
+  if (navigator?.mediaDevices?.getUserMedia === undefined) {
     throw new StreamApiNotSupportedError();
   }
 
-  // This is a brower API only shim. It patches the global window object which
+  // This is a browser API only shim. It patches the global window object which
   // is not available during SSR. So we lazily apply this shim at runtime.
-  if (streamApiShimApplied === false) {
-    adapterFactory({ window });
-    streamApiShimApplied = true;
-  }
+  await shimGetUserMedia();
 
   const constraints = {
     audio: false,

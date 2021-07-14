@@ -6,6 +6,7 @@ install:
 
 script:
   - npm run build
+  - npm run build:docs
 
 cache: npm
 
@@ -14,6 +15,12 @@ deploy:
     skip_cleanup: true
     on:
       all_branches: true
-      condition: $TRAVIS_BRANCH =~ ^(master|alpha)$
-    script:
-      - npx semantic-release
+      condition: $TRAVIS_BRANCH =~ ^(master|beta)$
+    script: npx semantic-release
+  - provider: pages
+    skip_cleanup: true
+    keep_history: true
+    github_token: $GH_TOKEN
+    on:
+      branch: master
+    local_dir: docs/.vuepress/dist

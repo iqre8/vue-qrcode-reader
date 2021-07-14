@@ -1,25 +1,28 @@
 <template lang="html">
-  <div class="wrapper">
+  <div class="qrcode-stream-wrapper">
     <!--
-    Note that the order of DOM elements matters.
-    It defines the stacking order.
-    The first element is at the very bottom, the last element is on top.
-    This eliminates the need for `z-index`.
+    Note, the following DOM elements are not styled with z-index.
+    If z-index is not defined, elements are stacked in the order they appear in the DOM.
+    The first element is at the very bottom and subsequent elements are added on top.
     -->
     <video
       ref="video"
       v-show="shouldScan"
-      class="camera"
+      class="qrcode-stream-camera"
       autoplay
       muted
       playsinline
     ></video>
 
-    <canvas ref="pauseFrame" v-show="!shouldScan" class="pause-frame"></canvas>
+    <canvas
+      ref="pauseFrame"
+      v-show="!shouldScan"
+      class="qrcode-stream-camera"
+    ></canvas>
 
-    <canvas ref="trackingLayer" class="tracking-layer"></canvas>
+    <canvas ref="trackingLayer" class="qrcode-stream-overlay"></canvas>
 
-    <div class="overlay">
+    <div class="qrcode-stream-overlay">
       <slot></slot>
     </div>
   </div>
@@ -27,10 +30,8 @@
 
 <script>
 import { keepScanning } from "../misc/scanner.js";
-import { thinSquare } from "../misc/track-func.js";
 import Camera from "../misc/camera.js";
 import CommonAPI from "../mixins/CommonAPI.vue";
-import Worker from "../worker/jsqr.js";
 
 export default {
   name: "qrcode-stream",
@@ -53,21 +54,14 @@ export default {
     },
 
     track: {
-      type: [Function, Boolean],
-      default: true
-    },
-
-    worker: {
-      type: Function,
-      default: Worker
+      type: Function
     }
   },
 
   data() {
     return {
       cameraInstance: null,
-      destroyed: false,
-      stopScanning: () => {}
+      destroyed: false
     };
   },
 
@@ -85,20 +79,10 @@ export default {
      * so often when visual tracking is disabled to improve performance.
      */
     scanInterval() {
-      if (this.track === false) {
+      if (this.track === undefined) {
         return 500;
       } else {
         return 40; // ~ 25fps
-      }
-    },
-
-    trackRepaintFunction() {
-      if (this.track === true) {
-        return thinSquare({ color: "#ff0000" });
-      } else if (this.track === false) {
-        return undefined;
-      } else {
-        return this.track;
       }
     }
   },
@@ -106,18 +90,22 @@ export default {
   watch: {
     shouldStream(shouldStream) {
       if (!shouldStream) {
-        const frame = this.cameraInstance.captureFrame();
-        this.paintPauseFrame(frame);
+        const canvas = this.$refs.pauseFrame;
+        const ctx = canvas.getContext("2d");
+        const video = this.$refs.video;
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
       }
     },
 
     shouldScan(shouldScan) {
       if (shouldScan) {
-        this.clearPauseFrame();
-        this.clearTrackingLayer();
+        this.clearCanvas(this.$refs.pauseFrame);
+        this.clearCanvas(this.$refs.trackingLayer);
         this.startScanning();
-      } else {
-        this.stopScanning();
       }
     },
 
@@ -136,7 +124,6 @@ export default {
 
   beforeDestroy() {
     this.beforeResetCamera();
-    this.stopScanning();
     this.destroyed = true;
   },
 
@@ -180,8 +167,7 @@ export default {
         this.onDetect(Promise.resolve(result));
       };
 
-      // this.stopScanning()
-      this.stopScanning = keepScanning(this.worker, this.cameraInstance, {
+      keepScanning(this.$refs.video, {
         detectHandler,
         locateHandler: this.onLocate,
         minDelay: this.scanInterval
@@ -197,51 +183,98 @@ export default {
 
     onLocate(location) {
       if (this.trackRepaintFunction === undefined || location === null) {
-        this.clearTrackingLayer();
+        this.clearCanvas(this.$refs.trackingLayer);
       } else {
-        this.repaintTrackingLayer(location);
+        const video = this.$refs.video;
+        const canvas = this.$refs.trackingLayer;
+
+        if (video !== undefined && canvas !== undefined) {
+          this.repaintTrackingLayer(video, canvas, location);
+        }
       }
     },
 
-    repaintTrackingLayer(location) {
-      const video = this.$refs.video;
+    onLocate(detectedCodes) {
       const canvas = this.$refs.trackingLayer;
+      const video = this.$refs.video;
+
+      if (canvas !== undefined) {
+        if (detectedCodes.length > 0 && this.track !== undefined && video !== undefined) {
+          // The visually occupied area of the video element.
+          // Because the component is responsive and fills the available space,
+          // this can be more or less than the actual resolution of the camera.
+          const displayWidth = video.offsetWidth;
+          const displayHeight = video.offsetHeight;
+
+          // The actual resolution of the camera.
+          // These values are fixed no matter the screen size.
+          const resolutionWidth = video.videoWidth;
+          const resolutionHeight = video.videoHeight;
+
+          // Dimensions of the video element as if there would be no
+          //   object-fit: cover;
+          // Thus, the ratio is the same as the cameras resolution but it's
+          // scaled down to the size of the visually occupied area.
+          const largerRatio = Math.max(
+            displayWidth / resolutionWidth,
+            displayHeight / resolutionHeight
+          );
+          const uncutWidth = resolutionWidth * largerRatio;
+          const uncutHeight = resolutionHeight * largerRatio;
+
+          const xScalar = uncutWidth / resolutionWidth;
+          const yScalar = uncutHeight / resolutionHeight;
+          const xOffset = (displayWidth - uncutWidth) / 2;
+          const yOffset = (displayHeight - uncutHeight) / 2;
+
+          const scale = ({ x, y }) => {
+            return {
+              x: Math.floor(x * xScalar),
+              y: Math.floor(y * yScalar)
+            };
+          }
+
+          const translate = ({ x, y }) => {
+            return {
+              x: Math.floor(x + xOffset),
+              y: Math.floor(y + yOffset)
+            };
+          }
+
+          const adjustedCodes = detectedCodes.map(detectedCode => {
+            const { boundingBox, cornerPoints } = detectedCode
+
+            const { x, y } = translate(scale({
+              x: boundingBox.x,
+              y: boundingBox.y
+            }))
+            const { x: width, y: height } = scale({
+              x: boundingBox.width,
+              y: boundingBox.height
+            })
+
+            return {
+              ...detectedCode,
+              cornerPoints: cornerPoints.map(point => translate(scale(point))),
+              boundingBox: DOMRectReadOnly.fromRect({ x, y, width, height })
+            }
+          })
+
+          canvas.width = video.offsetWidth;
+          canvas.height = video.offsetHeight;
+
+          const ctx = canvas.getContext('2d');
+
+          this.track(adjustedCodes, ctx);
+        } else {
+          this.clearCanvas(canvas);
+        }
+      }
+    },
+
+    repaintTrackingLayer(video, canvas, location) {
       const ctx = canvas.getContext("2d");
 
-      // The visually occupied area of the video element.
-      // Because the component is responsive and fills the available space,
-      // this can be more or less than the actual resolution of the camera.
-      const displayWidth = video.offsetWidth;
-      const displayHeight = video.offsetHeight;
-
-      // The actual resolution of the camera.
-      // These values are fixed no matter the screen size.
-      const resolutionWidth = video.videoWidth;
-      const resolutionHeight = video.videoHeight;
-
-      // Dimensions of the video element as if there would be no
-      //   object-fit: cover;
-      // Thus, the ratio is the same as the cameras resolution but it's
-      // scaled down to the size of the visually occupied area.
-      const largerRatio = Math.max(
-        displayWidth / resolutionWidth,
-        displayHeight / resolutionHeight
-      );
-      const uncutWidth = resolutionWidth * largerRatio;
-      const uncutHeight = resolutionHeight * largerRatio;
-
-      const xScalar = uncutWidth / resolutionWidth;
-      const yScalar = uncutHeight / resolutionHeight;
-      const xOffset = (displayWidth - uncutWidth) / 2;
-      const yOffset = (displayHeight - uncutHeight) / 2;
-
-      const coordinatesAdjusted = {};
-      for (const key in location) {
-        coordinatesAdjusted[key] = {
-          x: Math.floor(location[key].x * xScalar + xOffset),
-          y: Math.floor(location[key].y * yScalar + yOffset)
-        };
-      }
 
       window.requestAnimationFrame(() => {
         canvas.width = displayWidth;
@@ -251,59 +284,38 @@ export default {
       });
     },
 
-    clearTrackingLayer() {
-      const canvas = this.$refs.trackingLayer;
+    clearCanvas(canvas) {
       const ctx = canvas.getContext("2d");
-
-      window.requestAnimationFrame(() => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-      });
-    },
-
-    paintPauseFrame(imageData) {
-      const canvas = this.$refs.pauseFrame;
-      const ctx = canvas.getContext("2d");
-
-      window.requestAnimationFrame(() => {
-        canvas.width = imageData.width;
-        canvas.height = imageData.height;
-
-        ctx.putImageData(imageData, 0, 0);
-      });
-    },
-
-    clearPauseFrame() {
-      const canvas = this.$refs.pauseFrame;
-      const ctx = canvas.getContext("2d");
-
-      window.requestAnimationFrame(() => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-      });
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
+
   }
 };
 </script>
 
 <style lang="css" scoped>
-.wrapper {
+.qrcode-stream-wrapper {
+  width: 100%;
+  height: 100%;
+
   position: relative;
   z-index: 0;
-  width: 100%;
-  height: 100%;
 }
 
-.overlay, .tracking-layer {
-  position: absolute;
+.qrcode-stream-overlay {
   width: 100%;
   height: 100%;
+
+  position: absolute;
   top: 0;
   left: 0;
 }
 
-.camera, .pause-frame {
-  display: block;
-  object-fit: cover;
+.qrcode-stream-camera {
   width: 100%;
   height: 100%;
+
+  display: block;
+  object-fit: cover;
 }
 </style>
